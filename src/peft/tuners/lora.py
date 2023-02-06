@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import importlib
 import math
 import warnings
@@ -24,6 +23,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers.pytorch_utils import Conv1D
+
+import bitsandbytes as bnb
 
 from ..utils import PeftConfig, PeftType, transpose
 
@@ -52,6 +53,8 @@ class LoraConfig(PeftConfig):
         fan_in_fan_out (`bool`): Set this to True if the layer to replace stores weight like (fan_in, fan_out)
         enable_lora ( `List[bool]`): Used with `lora.MergedLinear`.
         bias (`str`): Bias type for Lora. Can be 'none', 'all' or 'lora_only'
+        modules_to_save (`List[str]`):List of modules apart from LoRA layers to be set as trainable
+            and saved in the final checkpoint.
     """
 
     r: int = field(default=8, metadata={"help": "Lora attention dimension"})
@@ -67,6 +70,14 @@ class LoraConfig(PeftConfig):
     )
     enable_lora: Optional[List[bool]] = field(default=None, metadata={"help": "Used with `lora.MergedLinear`."})
     bias: str = field(default="none", metadata={"help": "Bias type for Lora. Can be 'none', 'all' or 'lora_only'"})
+    modules_to_save: Optional[List[str]] = field(
+        default=None,
+        metadata={
+            "help": "List of modules apart from LoRA layers to be set as trainable and saved in the final checkpoint. "
+            "For example, in Sequence Classification or Token Classification tasks, "
+            "the final layer `classifier/score` are randomly initialized and as such need to be trainable and saved."
+        },
+    )
 
     def __post_init__(self):
         self.peft_type = PeftType.LORA
@@ -104,8 +115,10 @@ class LoraModel(torch.nn.Module):
         self.model = model
         self._find_and_replace()
         mark_only_lora_as_trainable(self.model, self.peft_config.bias)
+        self.forward = self.model.forward
 
     def _find_and_replace(self):
+        is_target_modules_in_base_model = False
         kwargs = {
             "r": self.peft_config.r,
             "lora_alpha": self.peft_config.lora_alpha,
@@ -116,9 +129,21 @@ class LoraModel(torch.nn.Module):
         key_list = [key for key, _ in self.model.named_modules()]
         for key in key_list:
             if any(key.endswith(target_key) for target_key in self.peft_config.target_modules):
+                if not is_target_modules_in_base_model:
+                    is_target_modules_in_base_model = True
                 parent, target, target_name = self._get_submodules(key)
                 bias = target.bias is not None
-                if isinstance(target, torch.nn.Linear) and self.peft_config.enable_lora is None:
+                if isinstance(target, bnb.nn.Linear8bitLt) and self.peft_config.enable_lora is None:
+                    kwargs.update(
+                        {
+                            "has_fp16_weights": target.state.has_fp16_weights,
+                            "memory_efficient_backward": target.state.memory_efficient_backward,
+                            "threshold": target.state.threshold,
+                            "index": target.index,
+                        }
+                    )
+                    new_module = Linear8bitLt(target.in_features, target.out_features, bias=bias, **kwargs)
+                elif isinstance(target, torch.nn.Linear) and self.peft_config.enable_lora is None:
                     new_module = Linear(target.in_features, target.out_features, bias=bias, **kwargs)
                 elif self.peft_config.enable_lora is not None:
                     kwargs.update({"enable_lora": self.peft_config.enable_lora})
@@ -134,6 +159,11 @@ class LoraModel(torch.nn.Module):
                             kwargs["fan_in_fan_out"] = False
                     new_module = MergedLinear(in_features, out_features, bias=bias, **kwargs)
                 self._replace_module(parent, target_name, new_module, target)
+        if not is_target_modules_in_base_model:
+            raise ValueError(
+                f"Target modules {self.peft_config.target_modules} not found in the base model. "
+                f"Please check the target modules and try again."
+            )
 
     def _get_submodules(self, key):
         parent = self.model.get_submodule(".".join(key.split(".")[:-1]))
@@ -146,9 +176,9 @@ class LoraModel(torch.nn.Module):
         new_module.weight = old_module.weight
         if old_module.bias is not None:
             new_module.bias = old_module.bias
-
-    def forward(self, *args, **kwargs):
-        return self.model(*args, **kwargs)
+        if getattr(old_module, "state", None) is not None:
+            new_module.state = old_module.state
+            new_module.to(old_module.weight.device)
 
     def __getattr__(self, name: str):
         """Forward missing attributes to the wrapped module."""
@@ -358,3 +388,47 @@ class MergedLinear(nn.Linear, LoraLayer):
                 after_B = self.lora_B(after_A.transpose(-2, -1)).transpose(-2, -1)
                 result += self.zero_pad(after_B) * self.scaling
             return result
+
+
+class Linear8bitLt(bnb.nn.Linear8bitLt, LoraLayer):
+    # Lora implemented in a dense layer
+    def __init__(
+        self,
+        in_features,
+        out_features,
+        r: int = 0,
+        lora_alpha: int = 1,
+        lora_dropout: float = 0.0,
+        **kwargs,
+    ):
+        bnb.nn.Linear8bitLt.__init__(
+            self,
+            in_features,
+            out_features,
+            bias=kwargs.get("bias", True),
+            has_fp16_weights=kwargs.get("has_fp16_weights", True),
+            memory_efficient_backward=kwargs.get("memory_efficient_backward", False),
+            threshold=kwargs.get("threshold", 0.0),
+            index=kwargs.get("index", None),
+        )
+        LoraLayer.__init__(self, r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout, merge_weights=False)
+        # Actual trainable parameters
+        if r > 0:
+            self.lora_A = nn.Linear(in_features, r, bias=False)
+            self.lora_B = nn.Linear(r, out_features, bias=False)
+            self.scaling = self.lora_alpha / self.r
+            # Freezing the pre-trained weight matrix
+            self.weight.requires_grad = False
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        if hasattr(self, "lora_A"):
+            # initialize A the same way as the default for nn.Linear and B to zero
+            nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
+            nn.init.zeros_(self.lora_B.weight)
+
+    def forward(self, x: torch.Tensor):
+        result = super().forward(x)
+        if self.r > 0:
+            result += self.lora_B(self.lora_A(self.lora_dropout(x))) * self.scaling
+        return result

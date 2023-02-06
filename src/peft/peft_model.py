@@ -14,18 +14,32 @@
 # limitations under the License.
 
 import inspect
+import os
 import warnings
 
 import torch
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers import PreTrainedModel
 from transformers.modeling_outputs import SequenceClassifierOutput, TokenClassifierOutput
+from transformers.utils import PushToHubMixin
+
+from huggingface_hub import hf_hub_download
 
 from .tuners import LoraModel, PrefixEncoder, PromptEmbedding, PromptEncoder
-from .utils import PeftConfig, PeftType, TaskType, _set_trainable, shift_tokens_right
+from .utils import (
+    WEIGHTS_NAME,
+    PeftConfig,
+    PeftType,
+    PromptLearningConfig,
+    TaskType,
+    _set_trainable,
+    get_peft_model_state_dict,
+    set_peft_model_state_dict,
+    shift_tokens_right,
+)
 
 
-class PeftModel(torch.nn.Module):
+class PeftModel(PushToHubMixin, torch.nn.Module):
     """
     Parameter-Efficient Fine-Tuning Model. Base model encompassing various Peft methods.
 
@@ -39,14 +53,14 @@ class PeftModel(torch.nn.Module):
         - **peft_config** ([`PeftConfig`]) -- The configuration of the Peft model.
         - **modules_to_save** (`list` of `str`) -- The list of sub-module names to save when
         saving the model.
-        - **prompt_encoder** ([`PromptEncoder`]) -- The prompt encoder used for Peft if `peft_config.peft_type
-        != PeftType.LORA`.
+        - **prompt_encoder** ([`PromptEncoder`]) -- The prompt encoder used for Peft if
+        `isinstance(self.peft_config, PromptLearningConfig)`.
         - **prompt_tokens** (`torch.Tensor`) -- The virtual prompt tokens used for Peft if
-        `peft_config.peft_type != PeftType.LORA`.
+        `isinstance(self.peft_config, PromptLearningConfig)`.
         - **transformer_backbone_name** (`str`) -- The name of the transformer
-        backbone in the base model if `peft_config.peft_type != PeftType.LORA`.
+        backbone in the base model if `isinstance(self.peft_config, PromptLearningConfig)`.
         - **word_embeddings** (`torch.nn.Embedding`) -- The word embeddings of the transformer backbone
-        in the base model if `peft_config.peft_type != PeftType.LORA`.
+        in the base model if `isinstance(self.peft_config, PromptLearningConfig)`.
     """
 
     def __init__(self, model, peft_config: PeftConfig):
@@ -55,11 +69,88 @@ class PeftModel(torch.nn.Module):
         self.base_model = model
         self.config = self.base_model.config
         self.modules_to_save = None
-        if peft_config.peft_type != PeftType.LORA:
+        if isinstance(self.peft_config, PromptLearningConfig):
             self._setup_prompt_encoder()
         else:
             self.base_model = LoraModel(peft_config, model)
+        if getattr(self.peft_config, "modules_to_save", None) is not None:
+            self.modules_to_save = self.peft_config.modules_to_save
+            _set_trainable(self)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def save_pretrained(self, save_directory, **kwargs):
+        r"""
+        Args:
+        This function saves the adapter model and the adapter configuration files to a directory, so that it can be
+        re-loaded using the `LoraModel.from_pretrained` class method, and also used by the `LoraModel.push_to_hub`
+        method.
+            save_directory (`str`):
+                Directory where the adapter model and configuration files will be saved (will be created if it does not
+                exist).
+            **kwargs:
+                Additional keyword arguments passed along to the `push_to_hub` method.
+        """
+        if os.path.isfile(save_directory):
+            raise ValueError(f"Provided path ({save_directory}) should be a directory, not a file")
+        os.makedirs(save_directory, exist_ok=True)
+
+        # save the config
+        if self.peft_config.base_model_name_or_path is None:
+            self.peft_config.base_model_name_or_path = (
+                self.base_model.__dict__.get("name_or_path", None)
+                if isinstance(self.peft_config, PromptLearningConfig)
+                else self.base_model.model.__dict__.get("name_or_path", None)
+            )
+        self.peft_config.inference_mode = True
+        self.peft_config.save_pretrained(save_directory)
+
+        for param in self.parameters():
+            param.requires_grad = False  # freeze the model
+
+        # save only the trainable weights
+        output_state_dict = get_peft_model_state_dict(self, kwargs.get("state_dict", None))
+        torch.save(output_state_dict, os.path.join(save_directory, WEIGHTS_NAME))
+
+    @classmethod
+    def from_pretrained(cls, model, model_id, **kwargs):
+        r"""
+        Args:
+        Instantiate a `LoraModel` from a pretrained Lora configuration and weights.
+            model (`transformers.PreTrainedModel`):
+                The model to be adapted. The model should be initialized with the `from_pretrained` method. from
+                `transformers` library.
+            model_id (`str`):
+                The name of the Lora configuration to use. Can be either:
+                    - A string, the `model id` of a Lora configuration hosted inside a model repo on
+                        huggingface Hub
+                    - A path to a directory containing a Lora configuration file saved using the
+                        `save_pretrained` method, e.g., ``./my_lora_config_directory/``.
+        """
+        from .mapping import MODEL_TYPE_TO_PEFT_MODEL_MAPPING, PEFT_TYPE_TO_CONFIG_MAPPING
+
+        # load the config
+        config = PEFT_TYPE_TO_CONFIG_MAPPING[PeftConfig.from_pretrained(model_id).peft_type].from_pretrained(model_id)
+
+        if config.task_type not in MODEL_TYPE_TO_PEFT_MODEL_MAPPING.keys():
+            model = cls(model, config)
+        else:
+            model = MODEL_TYPE_TO_PEFT_MODEL_MAPPING[config.task_type](model, config)
+
+        # load weights if any
+        if os.path.exists(os.path.join(model_id, WEIGHTS_NAME)):
+            filename = os.path.join(model_id, WEIGHTS_NAME)
+        else:
+            try:
+                filename = hf_hub_download(model_id, WEIGHTS_NAME)
+            except:  # noqa
+                raise ValueError(
+                    f"Can't find weights for {model_id} in {model_id} or in the Hugging Face Hub. "
+                    f"Please check that the file {WEIGHTS_NAME} is present at {model_id}."
+                )
+
+        adapters_weights = torch.load(filename)
+        # load the weights into the model
+        return set_peft_model_state_dict(model, adapters_weights)
 
     def _setup_prompt_encoder(self):
         num_transformer_submodules = 0
@@ -159,6 +250,15 @@ class PeftModel(torch.nn.Module):
         except AttributeError:
             return getattr(self.base_model, name)
 
+    def forward(self, *args, **kwargs):
+        """
+        Forward pass of the model.
+        """
+        if isinstance(self.peft_config, PromptLearningConfig):
+            return self.base_model(*args, **kwargs)
+        else:
+            return self.base_model.model(*args, **kwargs)
+
 
 class PeftModelForSequenceClassification(PeftModel):
     """
@@ -211,7 +311,7 @@ class PeftModelForSequenceClassification(PeftModel):
     ):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        if self.peft_config.peft_type == PeftType.LORA:
+        if not isinstance(self.peft_config, PromptLearningConfig):
             return self.base_model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -368,7 +468,7 @@ class PeftModelForCausalLM(PeftModel):
         return_dict=None,
         **kwargs,
     ):
-        if self.peft_config.peft_type == PeftType.LORA:
+        if not isinstance(self.peft_config, PromptLearningConfig):
             return self.base_model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -417,7 +517,7 @@ class PeftModelForCausalLM(PeftModel):
             return self.base_model(inputs_embeds=inputs_embeds, **kwargs)
 
     def generate(self, **kwargs):
-        if self.peft_config.peft_type == PeftType.LORA:
+        if not isinstance(self.peft_config, PromptLearningConfig):
             return self.base_model.generate(**kwargs)
         else:
             if "input_ids" not in kwargs:
@@ -499,7 +599,7 @@ class PeftModelForSeq2SeqLM(PeftModel):
         return_dict=None,
         **kwargs,
     ):
-        if self.peft_config.peft_type == PeftType.LORA:
+        if not isinstance(self.peft_config, PromptLearningConfig):
             return self.base_model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -567,7 +667,7 @@ class PeftModelForSeq2SeqLM(PeftModel):
             return self.base_model(inputs_embeds=inputs_embeds, decoder_inputs_embeds=decoder_inputs_embeds, **kwargs)
 
     def generate(self, **kwargs):
-        if self.peft_config.peft_type == PeftType.LORA:
+        if not isinstance(self.peft_config, PromptLearningConfig):
             return self.base_model.generate(**kwargs)
         else:
             if "input_ids" not in kwargs:
@@ -655,7 +755,7 @@ class PeftModelForTokenClassification(PeftModel):
     ):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        if self.peft_config.peft_type == PeftType.LORA:
+        if not isinstance(self.peft_config, PromptLearningConfig):
             return self.base_model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
