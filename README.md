@@ -26,7 +26,7 @@ Seamlessly integrated with 🤗 Accelerate for large scale models leveraging Dee
 Supported methods:
 
 1. LoRA: [LORA: LOW-RANK ADAPTATION OF LARGE LANGUAGE MODELS](https://arxiv.org/pdf/2106.09685.pdf)
-2. Prefix Tuning: [P-Tuning v2: Prompt Tuning Can Be Comparable to Fine-tuning Universally Across Scales and Tasks](https://arxiv.org/pdf/2110.07602.pdf)
+2. Prefix Tuning: [Prefix-Tuning: Optimizing Continuous Prompts for Generation](https://aclanthology.org/2021.acl-long.353/), [P-Tuning v2: Prompt Tuning Can Be Comparable to Fine-tuning Universally Across Scales and Tasks](https://arxiv.org/pdf/2110.07602.pdf)
 3. P-Tuning: [GPT Understands, Too](https://arxiv.org/pdf/2103.10385.pdf)
 4. Prompt Tuning: [The Power of Scale for Parameter-Efficient Prompt Tuning](https://arxiv.org/pdf/2104.08691.pdf) 
 
@@ -52,7 +52,7 @@ model.print_trainable_parameters()
 
 ### Get comparable performance to full finetuning by adapting LLMs to downstream tasks using consumer hardware
 
-GPU memory required for adapting LLMs on the few-shot dataset `ought/raft/twitter_complaints`. Here, settings considered
+GPU memory required for adapting LLMs on the few-shot dataset [`ought/raft/twitter_complaints`](https://huggingface.co/datasets/ought/raft/viewer/twitter_complaints). Here, settings considered
 are full finetuning, PEFT-LoRA using plain PyTorch and  PEFT-LoRA using DeepSpeed with CPU Offloading. 
 
 Hardware: Single A100 80GB GPU with CPU RAM above 64GB
@@ -63,9 +63,9 @@ Hardware: Single A100 80GB GPU with CPU RAM above 64GB
 | bigscience/mt0-xxl (12B params) | OOM GPU | 56GB GPU / 3GB CPU | 22GB GPU / 52GB CPU |
 | bigscience/bloomz-7b1 (7B params) | OOM GPU | 32GB GPU / 3.8GB CPU | 18.1GB GPU / 35GB CPU |
 
-Performance of PEFT-LoRA tuned `bigscience/T0_3B` on `ought/raft/twitter_complaints` leaderboard. 
-A point to note is that we didn't try to sequeeze performance by playing around with input instruction templates, LoRA hyperparams and other training related hyperparams. Also, we didn't use the larger 13B mt0-xxl model.
-So, we are already seeing comparable performance to SoTA with parameter effcient tuning. Also, the final checkpoint size is just `19MB` in comparison to `11GB` size of the backbone `bigscience/T0_3B` model.
+Performance of PEFT-LoRA tuned [`bigscience/T0_3B`](https://huggingface.co/bigscience/T0_3B) on [`ought/raft/twitter_complaints`](https://huggingface.co/datasets/ought/raft/viewer/twitter_complaints) leaderboard. 
+A point to note is that we didn't try to sequeeze performance by playing around with input instruction templates, LoRA hyperparams and other training related hyperparams. Also, we didn't use the larger 13B [mt0-xxl](https://huggingface.co/bigscience/mt0-xxl) model.
+So, we are already seeing comparable performance to SoTA with parameter efficient tuning. Also, the final checkpoint size is just `19MB` in comparison to `11GB` size of the backbone [`bigscience/T0_3B`](https://huggingface.co/bigscience/T0_3B) model.
 
 |   Submission Name        | Accuracy |
 | --------- | ---- |
@@ -77,9 +77,9 @@ So, we are already seeing comparable performance to SoTA with parameter effcient
 
 ### Parameter Efficient Tuning of Diffusion Models
 
-GPU memory required by different settings during training are given below. The final checkpoint size being `8.8 MB`.
+GPU memory required by different settings during training is given below. The final checkpoint size is `8.8 MB`.
 
-Hardware: Single A100 80GB GPU with CPU RAM above 64G
+Hardware: Single A100 80GB GPU with CPU RAM above 64GB
 
 |   Model         | Full Finetuning | PEFT-LoRA  | PEFT-LoRA with Gradient Checkpoitning  |
 | --------- | ---- | ---- | ---- |
@@ -125,7 +125,15 @@ Try out the 🤗 Gradio Space which should run seamlessly on a T4 instance:
 
 ![peft lora dreambooth gradio space](https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/peft/peft_lora_dreambooth_gradio_space.png)
 
-### Parameter Efficient Tuning of LLMs for RLHF components such as Ranker and Policy [ToDo]
+### Parameter Efficient Tuning of LLMs for RLHF components such as Ranker and Policy
+- Here is an exmaple in [trl](https://github.com/lvwerra/trl) library using PEFT+INT8 for tuning policy model: [gpt2-sentiment_peft.py](https://github.com/lvwerra/trl/blob/main/examples/sentiment/scripts/gpt2-sentiment_peft.py) 
+- Example using PEFT for both reward model and policy [ToDo]
+
+### INT8 training of large models in Colab using PEFT LoRA and bits_and_bytes
+
+- Here is now a demo on how to fine tune [OPT-6.7b](https://huggingface.co/facebook/opt-6.7b) (14GB in fp16) in a Google colab: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1jCkpikz0J2o20FBQmYmAGdiKmJGOMo-o?usp=sharing)
+
+- Here is now a demo on how to fine tune [whishper-large](openai/whisper-large-v2) (1.5B params) (14GB in fp16) in a Google colab: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1DOkD_5OUjFa0r5Ik3SgywJLJtEo2qLxO?usp=sharing) and [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1vhF8yueFqha3Y3CpTHN6q9EVcII9EYzs?usp=sharing)
 
 ### Save compute and storage even for medium and small models
 
@@ -133,9 +141,9 @@ Save storage by avoiding full finetuning of models on each of the downstream tas
 With PEFT methods, users only need to store tiny checkpoints in the order of `MBs` all the while retaining 
 performance comparable to full finetuning.
 
-An example of using LoRA for the task of adaping `LayoutLMForTokenClassification` on `FUNSD` dataset is given in `~examples/token_classification/PEFT_LoRA_LayoutLMForTokenClassification_on_FUNSD.py`. We can observe that with only `0.62 %` of parameters being trainable, we achieve performance (F1 0.777) comparable to full finetuning (F1 0.786) (without any hyerparam tuning runs for extracting more performance), and the checkpoint of this is only `2.8MB`. Now, if there are `N` such datasets, just have these PEFT models one for each dataset and save a lot of storage without having to worry about the problem of catastrophic forgetting or overfitting of backbone/base model.
+An example of using LoRA for the task of adapting `LayoutLMForTokenClassification` on `FUNSD` dataset is given in `~examples/token_classification/PEFT_LoRA_LayoutLMForTokenClassification_on_FUNSD.py`. We can observe that with only `0.62 %` of parameters being trainable, we achieve performance (F1 0.777) comparable to full finetuning (F1 0.786) (without any hyerparam tuning runs for extracting more performance), and the checkpoint of this is only `2.8MB`. Now, if there are `N` such datasets, just have these PEFT models one for each dataset and save a lot of storage without having to worry about the problem of catastrophic forgetting or overfitting of backbone/base model.
 
-Another example is fine-tuning `roberta-large` on `MRPC` GLUE dataset suing differenct PEFT methods. The notebooks are given in `~examples/sequence_classification`. 
+Another example is fine-tuning [`roberta-large`](https://huggingface.co/roberta-large) on [`MRPC` GLUE](https://huggingface.co/datasets/glue/viewer/mrpc) dataset suing differenct PEFT methods. The notebooks are given in `~examples/sequence_classification`. 
 
 
 ## PEFT + 🤗 Accelerate
@@ -143,12 +151,12 @@ Another example is fine-tuning `roberta-large` on `MRPC` GLUE dataset suing diff
 PEFT models work with 🤗 Accelerate out of the box. Use 🤗 Accelerate for Distributed training on various hardware such as GPUs, Apple Silicon devices etc during training.
 Use 🤗 Accelerate for inferencing on consumer hardware with small resources.
 
-### Example of PEFT model training using 🤗 Accelerate's DeepSpeed integation
+### Example of PEFT model training using 🤗 Accelerate's DeepSpeed integration
 
- Currently DeepSpeed requires PR [ZeRO3 handling frozen weights](https://github.com/microsoft/DeepSpeed/pull/2653) to fix [[REQUEST] efficiently deal with frozen weights during training](https://github.com/microsoft/DeepSpeed/issues/2615) issue. Example is provided in `~examples/conditional_generation/peft_lora_seq2seq_accelerate_ds_zero3_offload.py`. 
-  a. First run `accelerate config --config_file ds_zero3_cpu.yaml` and answer the questionaire. 
+DeepSpeed version required `v0.8.0`. An example is provided in `~examples/conditional_generation/peft_lora_seq2seq_accelerate_ds_zero3_offload.py`. 
+  a. First, run `accelerate config --config_file ds_zero3_cpu.yaml` and answer the questionnaire. 
   Below are the contents of the config file.
-  ```
+  ```yaml
   compute_environment: LOCAL_MACHINE
   deepspeed_config:
     gradient_accumulation_steps: 1
@@ -172,8 +180,8 @@ Use 🤗 Accelerate for inferencing on consumer hardware with small resources.
   same_network: true
   use_cpu: false
   ```
-  b. run the below command to launch example script
-  ```
+  b. run the below command to launch the example script
+  ```bash
   accelerate launch --config_file ds_zero3_cpu.yaml examples/peft_lora_seq2seq_accelerate_ds_zero3_offload.py
   ```
 
@@ -203,8 +211,7 @@ Use 🤗 Accelerate for inferencing on consumer hardware with small resources.
   ```
 
 ### Example of PEFT model inference using 🤗 Accelerate's Big Model Inferencing capabilities
-
-Example is provided in `~examples/causal_language_modeling/peft_lora_clm_accelerate_big_model_inference.ipynb`. 
+An example is provided in `~examples/causal_language_modeling/peft_lora_clm_accelerate_big_model_inference.ipynb`. 
 
 
 ## Models support matrix
@@ -217,6 +224,7 @@ Example is provided in `~examples/causal_language_modeling/peft_lora_clm_acceler
 | OPT            | ✅  | ✅  | ✅  | ✅  |
 | GPT-Neo        | ✅  | ✅  | ✅  | ✅  |
 | GPT-J          | ✅  | ✅  | ✅  | ✅  |
+| GPT-NeoX-20B   | ✅  | ✅  | ✅  | ✅  |
 
 ### Conditional Generation
 |   Model         | LoRA | Prefix Tuning  | P-Tuning | Prompt Tuning  | 
@@ -250,6 +258,31 @@ Example is provided in `~examples/causal_language_modeling/peft_lora_clm_acceler
 | Deberta        | ✅  |     |   |   | 
 | Deberta-v2     | ✅  |     |   |   |
 
+### Text-to-Image Generation
+
+|   Model         | LoRA | Prefix Tuning  | P-Tuning | Prompt Tuning  | 
+| --------- | ---- | ---- | ---- | ----  |
+| Stable Diffusion           | ✅  |   |   |   |  
+
+
+### Image Classification
+
+|   Model         | LoRA | Prefix Tuning  | P-Tuning | Prompt Tuning  | 
+| --------- | ---- | ---- | ---- | ----  |
+| ViT           | ✅  |   |   |   | 
+| Swin           | ✅  |   |   |   | 
+
+___Note that we have tested LoRA for [ViT](https://huggingface.co/docs/transformers/model_doc/vit) and [Swin](https://huggingface.co/docs/transformers/model_doc/swin) for fine-tuning on image classification. However, it should be possible to use LoRA for any compatible model [provided](https://huggingface.co/models?pipeline_tag=image-classification&sort=downloads&search=vit) by 🤗 Transformers. Check out the respective
+examples to learn more. If you run into problems, please open an issue.___
+
+The same principle applies to our [segmentation models](https://huggingface.co/models?pipeline_tag=image-segmentation&sort=downloads) as well. 
+
+### Semantic Segmentation
+
+|   Model         | LoRA | Prefix Tuning  | P-Tuning | Prompt Tuning  | 
+| --------- | ---- | ---- | ---- | ----  |
+| SegFormer           | ✅  |   |   |   | 
+
 
 ## Caveats:
 
@@ -267,10 +300,10 @@ any GPU memory savings. Please refer issue [[FSDP] FSDP with CPU offload consume
   model = accelerator.prepare(model)
   ```
 
-  Example of parameter efficient tuning with `mt0-xxl` base model using 🤗 Accelerate is provided in `~examples/conditional_generation/peft_lora_seq2seq_accelerate_fsdp.py`. 
-  a. First run `accelerate config --config_file fsdp_config.yaml` and answer the questionaire. 
+  Example of parameter efficient tuning with [`mt0-xxl`](https://huggingface.co/bigscience/mt0-xxl) base model using 🤗 Accelerate is provided in `~examples/conditional_generation/peft_lora_seq2seq_accelerate_fsdp.py`. 
+  a. First, run `accelerate config --config_file fsdp_config.yaml` and answer the questionnaire. 
   Below are the contents of the config file.
-  ```
+  ```yaml
   command_file: null
   commands: null
   compute_environment: LOCAL_MACHINE
@@ -300,19 +333,19 @@ any GPU memory savings. Please refer issue [[FSDP] FSDP with CPU offload consume
   tpu_zone: null
   use_cpu: false
   ```
-  b. run the below command to launch example script
-  ```
+  b. run the below command to launch the example script
+  ```bash
   accelerate launch --config_file fsdp_config.yaml examples/peft_lora_seq2seq_accelerate_fsdp.py
   ```
 
 2. When using `P_TUNING` or `PROMPT_TUNING` with `SEQ_2_SEQ` task, remember to remove the `num_virtual_token` virtual prompt predictions from the left side of the model outputs during evaluations. 
 
-3. `P_TUNING` or `PROMPT_TUNING` doesn't support `generate` functionality of transformers bcause `generate` strictly requires `input_ids`/`decoder_input_ids` but 
+3. For encoder-decoder models, `P_TUNING` or `PROMPT_TUNING` doesn't support `generate` functionality of transformers because `generate` strictly requires `decoder_input_ids` but 
 `P_TUNING`/`PROMPT_TUNING` appends soft prompt embeddings to `input_embeds` to create
 new `input_embeds` to be given to the model. Therefore, `generate` doesn't support this yet.
 
 ## Backlog:
-1. Explore and possibly integrate `(IA)^3` and `UniPELT`
+1. Explore and possibly integrate `(IA)^3`
 2. Add tests
 3. Add more use cases and examples
 
@@ -323,7 +356,7 @@ If you use 🤗 PEFT in your publication, please cite it by using the following 
 ```bibtex
 @Misc{peft,
   title =        {PEFT: State-of-the-art Parameter-Efficient Fine-Tuning methods},
-  author =       {Sourab Mangrulkar, Sylvain Gugger, Lysandre Debut},
+  author =       {Sourab Mangrulkar, Sylvain Gugger, Lysandre Debut, Younes Belkada, Sayak Paul},
   howpublished = {\url{https://github.com/huggingface/peft}},
   year =         {2022}
 }

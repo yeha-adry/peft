@@ -4,9 +4,12 @@ import sys
 import threading
 
 import numpy as np
+import psutil
 import torch
 from accelerate import Accelerator
+from datasets import load_dataset
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -15,10 +18,7 @@ from transformers import (
     set_seed,
 )
 
-import psutil
-from datasets import load_dataset
-from peft import LoraConfig, TaskType, get_peft_model, get_peft_model_state_dict
-from tqdm import tqdm
+from peft import LoraConfig, TaskType, get_peft_model
 
 
 def levenshtein_distance(str1, str2):
@@ -111,9 +111,6 @@ def main():
     model_name_or_path = "bigscience/bloomz-7b1"
     dataset_name = "twitter_complaints"
     peft_config = LoraConfig(task_type=TaskType.CAUSAL_LM, inference_mode=False, r=8, lora_alpha=32, lora_dropout=0.1)
-    checkpoint_name = (
-        f"{dataset_name}_{model_name_or_path}_{peft_config.peft_type}_{peft_config.task_type}_v1.pt".replace("/", "_")
-    )
     text_column = "Tweet text"
     label_column = "text_label"
     lr = 3e-3
@@ -121,6 +118,7 @@ def main():
     batch_size = 8
     seed = 42
     max_length = 64
+    do_test = False
     set_seed(seed)
 
     dataset = load_dataset("ought/raft", dataset_name)
@@ -282,7 +280,9 @@ def main():
                     outputs = accelerator.unwrap_model(model).generate(
                         **batch, synced_gpus=is_ds_zero_3, max_new_tokens=10
                     )  # synced_gpus=True for DS-stage 3
-                preds = outputs[:, max_length:].detach().cpu().numpy()
+                outputs = accelerator.pad_across_processes(outputs, dim=1, pad_index=tokenizer.pad_token_id)
+                preds = accelerator.gather(outputs)
+                preds = preds[:, max_length:].detach().cpu().numpy()
                 eval_preds.extend(tokenizer.batch_decode(preds, skip_special_tokens=True))
 
         # Printing the GPU memory usage details such as allocated memory, peak memory, and total memory usage
@@ -306,6 +306,9 @@ def main():
 
         correct = 0
         total = 0
+        assert len(eval_preds) == len(
+            dataset["train"][label_column]
+        ), f"{len(eval_preds)} != {len(dataset['train'][label_column])}"
         for pred, true in zip(eval_preds, dataset["train"][label_column]):
             if pred.strip() == true.strip():
                 correct += 1
@@ -315,35 +318,43 @@ def main():
         accelerator.print(f"{eval_preds[:10]=}")
         accelerator.print(f"{dataset['train'][label_column][:10]=}")
 
-    model.eval()
-    test_preds = []
-    for _, batch in enumerate(tqdm(test_dataloader)):
-        batch = {k: v for k, v in batch.items() if k != "labels"}
-        with torch.no_grad():
-            outputs = accelerator.unwrap_model(model).generate(
-                **batch, synced_gpus=is_ds_zero_3, max_new_tokens=10
-            )  # synced_gpus=True for DS-stage 3
-        test_preds.extend(
-            tokenizer.batch_decode(outputs[:, max_length:].detach().cpu().numpy(), skip_special_tokens=True)
-        )
+    if do_test:
+        model.eval()
+        test_preds = []
+        for _, batch in enumerate(tqdm(test_dataloader)):
+            batch = {k: v for k, v in batch.items() if k != "labels"}
+            with torch.no_grad():
+                outputs = accelerator.unwrap_model(model).generate(
+                    **batch, synced_gpus=is_ds_zero_3, max_new_tokens=10
+                )  # synced_gpus=True for DS-stage 3
+            outputs = accelerator.pad_across_processes(outputs, dim=1, pad_index=tokenizer.pad_token_id)
+            preds = accelerator.gather(outputs)
+            preds = preds[:, max_length:].detach().cpu().numpy()
+            test_preds.extend(tokenizer.batch_decode(preds, skip_special_tokens=True))
 
-    test_preds_cleaned = []
-    for _, pred in enumerate(test_preds):
-        test_preds_cleaned.append(get_closest_label(pred, classes))
+        test_preds_cleaned = []
+        for _, pred in enumerate(test_preds):
+            test_preds_cleaned.append(get_closest_label(pred, classes))
 
-    test_df = dataset["test"].to_pandas()
-    test_df[label_column] = test_preds_cleaned
-    test_df["text_labels_orig"] = test_preds
-    accelerator.print(test_df[[text_column, label_column]].sample(20))
+        test_df = dataset["test"].to_pandas()
+        assert len(test_preds_cleaned) == len(test_df), f"{len(test_preds_cleaned)} != {len(test_df)}"
+        test_df[label_column] = test_preds_cleaned
+        test_df["text_labels_orig"] = test_preds
+        accelerator.print(test_df[[text_column, label_column]].sample(20))
 
-    pred_df = test_df[["ID", label_column]]
-    pred_df.columns = ["ID", "Label"]
+        pred_df = test_df[["ID", label_column]]
+        pred_df.columns = ["ID", "Label"]
 
-    os.makedirs(f"data/{dataset_name}", exist_ok=True)
-    pred_df.to_csv(f"data/{dataset_name}/predictions.csv", index=False)
+        os.makedirs(f"data/{dataset_name}", exist_ok=True)
+        pred_df.to_csv(f"data/{dataset_name}/predictions.csv", index=False)
 
     accelerator.wait_for_everyone()
-    accelerator.save(get_peft_model_state_dict(model, state_dict=accelerator.get_state_dict(model)), checkpoint_name)
+    model.push_to_hub(
+        "smangrul/"
+        + f"{dataset_name}_{model_name_or_path}_{peft_config.peft_type}_{peft_config.task_type}".replace("/", "_"),
+        state_dict=accelerator.get_state_dict(model),
+        use_auth_token=True,
+    )
     accelerator.wait_for_everyone()
 
 

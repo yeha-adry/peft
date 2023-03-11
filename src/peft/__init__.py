@@ -17,7 +17,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__version__ = "0.1.0.dev0"
+__version__ = "0.3.0.dev0"
 
 from .mapping import MODEL_TYPE_TO_PEFT_MODEL_MAPPING, PEFT_TYPE_TO_CONFIG_MAPPING, get_peft_config, get_peft_model
 from .peft_model import (
@@ -40,13 +40,14 @@ from .tuners import (
     PromptTuningInit,
 )
 from .utils import (
+    TRANSFORMERS_MODELS_TO_PREFIX_TUNING_POSTPROCESS_MAPPING,
     PeftConfig,
     PeftType,
     PromptLearningConfig,
     TaskType,
     bloom_model_postprocess_past_key_value,
     get_peft_model_state_dict,
-    peft_model_load_and_dispatch,
+    prepare_model_for_int8_training,
     set_peft_model_state_dict,
     shift_tokens_right,
 )
