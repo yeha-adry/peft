@@ -28,7 +28,14 @@ from transformers import PreTrainedModel
 from transformers.modeling_outputs import SequenceClassifierOutput, TokenClassifierOutput
 from transformers.utils import PushToHubMixin
 
-from .tuners import AdaLoraModel, LoraModel, PrefixEncoder, PromptEmbedding, PromptEncoder
+from .tuners import (
+    AdaLoraModel,
+    AdaptionPromptModel,
+    LoraModel,
+    PrefixEncoder,
+    PromptEmbedding,
+    PromptEncoder,
+)
 from .utils import (
     TRANSFORMERS_MODELS_TO_PREFIX_TUNING_POSTPROCESS_MAPPING,
     WEIGHTS_NAME,
@@ -50,6 +57,7 @@ PEFT_TYPE_TO_MODEL_MAPPING = {
     PeftType.P_TUNING: PromptEncoder,
     PeftType.PREFIX_TUNING: PrefixEncoder,
     PeftType.ADALORA: AdaLoraModel,
+    PeftType.ADAPTION_PROMPT: AdaptionPromptModel,
 }
 
 
@@ -91,6 +99,7 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
             self.base_model = PEFT_TYPE_TO_MODEL_MAPPING[peft_config.peft_type](
                 self.base_model, self.peft_config, adapter_name
             )
+            self.set_additional_trainable_modules(peft_config, adapter_name)
         else:
             self.add_adapter(adapter_name, peft_config)
 
@@ -291,16 +300,18 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
         """
         Disables the adapter module.
         """
-        if isinstance(self.active_peft_config, PromptLearningConfig):
-            old_forward = self.forward
-            self.forward = self.base_model.forward
-        else:
-            self.base_model.disable_adapter_layers()
-        yield
-        if isinstance(self.active_peft_config, PromptLearningConfig):
-            self.forward = old_forward
-        else:
-            self.base_model.enable_adapter_layers()
+        try:
+            if isinstance(self.peft_config, PromptLearningConfig):
+                old_forward = self.forward
+                self.forward = self.base_model.forward
+            else:
+                self.base_model.disable_adapter_layers()
+            yield
+        finally:
+            if isinstance(self.peft_config, PromptLearningConfig):
+                self.forward = old_forward
+            else:
+                self.base_model.enable_adapter_layers()
 
     def get_base_model(self):
         """
@@ -319,11 +330,15 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
             self._setup_prompt_encoder(adapter_name)
         else:
             self.base_model.add_adapter(adapter_name, peft_config)
+
+        self.set_additional_trainable_modules(peft_config, adapter_name)
+
+    def set_additional_trainable_modules(self, peft_config, adapter_name):
         if getattr(peft_config, "modules_to_save", None) is not None:
             if self.modules_to_save is None:
                 self.modules_to_save = set(peft_config.modules_to_save)
             else:
-                self.modules_to_save = self.modules_to_save.update(peft_config.modules_to_save)
+                self.modules_to_save.update(peft_config.modules_to_save)
             _set_trainable(self, adapter_name)
 
     def load_adapter(self, model_id, adapter_name, is_trainable=False, **kwargs):
