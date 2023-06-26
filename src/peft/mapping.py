@@ -16,6 +16,7 @@
 from .peft_model import (
     PeftModel,
     PeftModelForCausalLM,
+    PeftModelForQuestionAnswering,
     PeftModelForSeq2SeqLM,
     PeftModelForSequenceClassification,
     PeftModelForTokenClassification,
@@ -36,6 +37,7 @@ MODEL_TYPE_TO_PEFT_MODEL_MAPPING = {
     "SEQ_2_SEQ_LM": PeftModelForSeq2SeqLM,
     "CAUSAL_LM": PeftModelForCausalLM,
     "TOKEN_CLS": PeftModelForTokenClassification,
+    "QUESTION_ANS": PeftModelForQuestionAnswering,
 }
 
 PEFT_TYPE_TO_CONFIG_MAPPING = {
@@ -101,7 +103,7 @@ def _prepare_prompt_learning_config(peft_config, model_config):
     return peft_config
 
 
-def get_peft_model(model, peft_config):
+def get_peft_model(model, peft_config, adapter_name="default") -> PeftModel:
     """
     Returns a Peft model object from a model and a config.
 
@@ -114,7 +116,7 @@ def get_peft_model(model, peft_config):
     if peft_config.task_type not in MODEL_TYPE_TO_PEFT_MODEL_MAPPING.keys() and not isinstance(
         peft_config, PromptLearningConfig
     ):
-        return PeftModel(model, peft_config)
+        return PeftModel(model, peft_config, adapter_name=adapter_name)
     if isinstance(peft_config, PromptLearningConfig):
         peft_config = _prepare_prompt_learning_config(peft_config, model_config)
-    return MODEL_TYPE_TO_PEFT_MODEL_MAPPING[peft_config.task_type](model, peft_config)
+    return MODEL_TYPE_TO_PEFT_MODEL_MAPPING[peft_config.task_type](model, peft_config, adapter_name=adapter_name)
