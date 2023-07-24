@@ -12,15 +12,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import copy
 import os
+import pickle
 import tempfile
 import unittest
+import warnings
+
+import pytest
 
 from peft import (
     AdaptionPromptConfig,
+    IA3Config,
     LoraConfig,
     PeftConfig,
     PrefixTuningConfig,
+    PromptEncoder,
     PromptEncoderConfig,
     PromptTuningConfig,
 )
@@ -36,6 +43,7 @@ class PeftConfigTestMixin:
         PrefixTuningConfig,
         PromptTuningConfig,
         AdaptionPromptConfig,
+        IA3Config,
     )
 
 
@@ -97,11 +105,9 @@ class PeftConfigTester(unittest.TestCase, PeftConfigTestMixin):
         r"""
         Test if the config can be correctly converted to a dict using:
         - to_dict
-        - __dict__
         """
         for config_class in self.all_config_classes:
             config = config_class()
-            self.assertEqual(config.to_dict(), config.__dict__)
             self.assertTrue(isinstance(config.to_dict(), dict))
 
     def test_from_pretrained_cache_dir(self):
@@ -133,3 +139,46 @@ class PeftConfigTester(unittest.TestCase, PeftConfigTestMixin):
 
                 config_from_pretrained = config_class.from_pretrained(tmp_dirname)
                 self.assertEqual(config.to_dict(), config_from_pretrained.to_dict())
+
+    def test_config_copy(self):
+        # see https://github.com/huggingface/peft/issues/424
+        for config_class in self.all_config_classes:
+            config = config_class()
+            copied = copy.copy(config)
+            self.assertEqual(config.to_dict(), copied.to_dict())
+
+    def test_config_deepcopy(self):
+        # see https://github.com/huggingface/peft/issues/424
+        for config_class in self.all_config_classes:
+            config = config_class()
+            copied = copy.deepcopy(config)
+            self.assertEqual(config.to_dict(), copied.to_dict())
+
+    def test_config_pickle_roundtrip(self):
+        # see https://github.com/huggingface/peft/issues/424
+        for config_class in self.all_config_classes:
+            config = config_class()
+            copied = pickle.loads(pickle.dumps(config))
+            self.assertEqual(config.to_dict(), copied.to_dict())
+
+    def test_prompt_encoder_warning_num_layers(self):
+        # This test checks that if a prompt encoder config is created with an argument that is ignored, there should be
+        # warning. However, there should be no warning if the default value is used.
+        kwargs = {
+            "num_virtual_tokens": 20,
+            "num_transformer_submodules": 1,
+            "token_dim": 768,
+            "encoder_hidden_size": 768,
+        }
+
+        # there should be no warning with just default argument for encoder_num_layer
+        config = PromptEncoderConfig(**kwargs)
+        with warnings.catch_warnings():
+            PromptEncoder(config)
+
+        # when changing encoder_num_layer, there should be a warning for MLP since that value is not used
+        config = PromptEncoderConfig(encoder_num_layers=123, **kwargs)
+        with pytest.warns(UserWarning) as record:
+            PromptEncoder(config)
+        expected_msg = "for MLP, the argument `encoder_num_layers` is ignored. Exactly 2 MLP layers are used."
+        assert str(record.list[0].message) == expected_msg

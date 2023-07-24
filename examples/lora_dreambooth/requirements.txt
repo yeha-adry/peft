@@ -1,6 +1,5 @@
 transformers
 accelerate
-loralib
 evaluate
 tqdm
 datasets
@@ -9,3 +8,4 @@ Pillow
 torchvision
 huggingface_hub
 safetensors
+wandb
