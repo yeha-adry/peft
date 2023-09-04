@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import copy
+import tempfile
 import unittest
 
 import torch
@@ -22,7 +23,7 @@ from parameterized import parameterized
 from torch import nn
 from transformers.pytorch_utils import Conv1D
 
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, PeftModel, get_peft_model
 
 from .testing_common import PeftCommonTester
 
@@ -35,6 +36,17 @@ TEST_CASES = [
     ("Vanilla MLP 2", "MLP", LoraConfig, {"target_modules": ["lin0"]}),
     ("Vanilla MLP 3", "MLP", LoraConfig, {"target_modules": ["lin1"]}),
     ("Vanilla MLP 4", "MLP", LoraConfig, {"target_modules": ["lin0", "lin1"]}),
+    ("Vanilla MLP 5", "MLP", LoraConfig, {"target_modules": ["lin0"], "modules_to_save": ["lin1"]}),
+    (
+        "Vanilla MLP 6",
+        "MLP",
+        LoraConfig,
+        {
+            "target_modules": ["lin0"],
+            "lora_alpha": 4,
+            "lora_dropout": 0.1,
+        },
+    ),
     ("Embedding + transformers Conv1D 1", "EmbConv1D", LoraConfig, {"target_modules": ["conv1d"]}),
     ("Embedding + transformers Conv1D 2", "EmbConv1D", LoraConfig, {"target_modules": ["emb"]}),
     ("Embedding + transformers Conv1D 3", "EmbConv1D", LoraConfig, {"target_modules": ["emb", "conv1d"]}),
@@ -156,11 +168,6 @@ class PeftCustomModelTester(unittest.TestCase, PeftCommonTester):
 
     @parameterized.expand(TEST_CASES)
     def test_merge_layers(self, test_name, model_id, config_cls, config_kwargs):
-        # for embeddings, even with init_lora_weights=False, the LoRA embeddings weights are still initialized to
-        # perform the identity transform, thus the test would fail.
-        if config_kwargs["target_modules"] == ["emb"]:
-            return
-
         config_kwargs = config_kwargs.copy()
         config_kwargs["init_lora_weights"] = False
         self._test_merge_layers(model_id, config_cls, config_kwargs)
@@ -176,17 +183,17 @@ class PeftCustomModelTester(unittest.TestCase, PeftCommonTester):
         pass
 
     @parameterized.expand(TEST_CASES)
-    def test_training_customs(self, test_name, model_id, config_cls, config_kwargs):
+    def test_training_custom_models(self, test_name, model_id, config_cls, config_kwargs):
         self._test_training(model_id, config_cls, config_kwargs)
 
     @parameterized.expand(TEST_CASES)
-    def test_training_customs_layer_indexing(self, test_name, model_id, config_cls, config_kwargs):
+    def test_training_custom_models_layer_indexing(self, test_name, model_id, config_cls, config_kwargs):
         # At the moment, layer indexing only works when layer names conform to a specific pattern, which is not
         # guaranteed here. Therefore, this test is not performed.
         pass
 
     @parameterized.expand(TEST_CASES)
-    def test_training_customs_gradient_checkpointing(self, test_name, model_id, config_cls, config_kwargs):
+    def test_training_custom_models_gradient_checkpointing(self, test_name, model_id, config_cls, config_kwargs):
         self._test_training_gradient_checkpointing(model_id, config_cls, config_kwargs)
 
     @parameterized.expand(TEST_CASES)
@@ -227,9 +234,49 @@ class PeftCustomModelTester(unittest.TestCase, PeftCommonTester):
         self.assertEqual(params_before.keys(), params_after.keys())
         for name, param_before in params_before.items():
             param_after = params_after[name]
-            if "lora_" in name:
+            if ("lora_" in name) or ("modules_to_save" in name):
+                # target_modules and modules_to_save _are_ updated
                 self.assertFalse(torch.allclose(param_before, param_after, atol=tol, rtol=tol))
             else:
+                self.assertTrue(torch.allclose(param_before, param_after, atol=tol, rtol=tol))
+
+    @parameterized.expand(TEST_CASES)
+    def test_parameters_after_loading_model(self, test_name, model_id, config_cls, config_kwargs):
+        # An explicit test that when loading a trained model, the parameters are loaded correctly
+        # see issue #808
+        X = self.prepare_inputs_for_testing()
+        model = self.transformers_class.from_pretrained(model_id).to(self.torch_device)
+        config = config_cls(
+            base_model_name_or_path=model_id,
+            **config_kwargs,
+        )
+        model = get_peft_model(model, config)
+        model.train()
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.5)
+
+        # train at least 3 steps for all parameters to be updated (probably this is required because of symmetry
+        # breaking of some LoRA layers that are initialized with constants)
+        for _ in range(3):
+            optimizer.zero_grad()
+            y_pred = model(**X)
+            loss = y_pred.sum()
+            loss.backward()
+            optimizer.step()
+
+        tol = 1e-4
+        params_before = dict(model.named_parameters())
+        # note: no need to sanity check if parameters were updated at all, this
+        # is already covered in the previous test
+
+        with tempfile.TemporaryDirectory() as tmp_dirname:
+            model.save_pretrained(tmp_dirname)
+            model_from_pretrained = self.transformers_class.from_pretrained(model_id).to(self.torch_device)
+            model_from_pretrained = PeftModel.from_pretrained(model_from_pretrained, tmp_dirname)
+            params_after = dict(model_from_pretrained.named_parameters())
+
+            self.assertEqual(params_before.keys(), params_after.keys())
+            for name, param_before in params_before.items():
+                param_after = params_after[name]
                 self.assertTrue(torch.allclose(param_before, param_after, atol=tol, rtol=tol))
 
     @parameterized.expand(TEST_CASES)
@@ -262,8 +309,12 @@ class PeftCustomModelTester(unittest.TestCase, PeftCommonTester):
         with model.disable_adapter():
             outputs_disabled = model(**X)
 
+        # check that after leaving the disable_adapter context, everything is enabled again
+        outputs_enabled_after_disable = model(**X)
+
         self.assertFalse(torch.allclose(outputs_before, outputs_after))
         self.assertTrue(torch.allclose(outputs_before, outputs_disabled))
+        self.assertTrue(torch.allclose(outputs_after, outputs_enabled_after_disable))
 
     @parameterized.expand(TEST_CASES)
     def test_disable_adapter_with_bias_warns(self, test_name, model_id, config_cls, config_kwargs):
@@ -308,3 +359,7 @@ class PeftCustomModelTester(unittest.TestCase, PeftCommonTester):
         if bias_warning_was_given:
             # This is bad, there was a warning about the bias when there should not have been any.
             self.fail("There should be no warning when bias is set to 'none'")
+
+    @parameterized.expand(TEST_CASES)
+    def test_adding_multiple_adapters_with_bias_raises(self, test_name, model_id, config_cls, config_kwargs):
+        self._test_adding_multiple_adapters_with_bias_raises(model_id, config_cls, config_kwargs)
